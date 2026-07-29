@@ -7,7 +7,7 @@
   <link rel="stylesheet" href="style.css" />
   <!-- Three.js (r152+) from CDN -->
   <script src="https://unpkg.com/three@0.152.2/build/three.min.js"></script>
-  <!-- MindAR Image Tracking (uses existing global THREE) -->
+  <!-- MindAR Image Tracking -->
   <script src="https://unpkg.com/mind-ar@1.1.4/dist/mindar-image-three.prod.js"></script>
 </head>
 <body>
@@ -15,19 +15,12 @@
   <video id="cameraFeed" autoplay playsinline muted></video>
 
   <div id="ui">
-    <div class="title">Seagull Flight (Camera)</div>
     <div class="controls">
-      <label>Birds: <input id="count" type="range" min="1" max="8" value="3"></label>
-      <label>Flap Speed: <input id="flapSpeed" type="range" min="0.4" max="2.5" step="0.05" value="1.0"></label>
-      <label>Flap Size: <input id="flapAmount" type="range" min="0.2" max="1.6" step="0.01" value="1.0"></label>
-      <label>Flight Speed: <input id="flightSpeed" type="range" min="0.2" max="3.0" step="0.05" value="1.0"></label>
-      <div style="display:flex;gap:8px;margin-top:6px;">
+      <div style="display:flex;gap:8px;">
         <button id="startCam">Start Camera</button>
-        <button id="capture" disabled>Capture</button>
+        <button id="resetCam">Reset Camera</button>
       </div>
-      <button id="resetCam">Reset Camera</button>
     </div>
-    <div class="hint">Tap Start Camera, then Capture to save a photo. Use rear camera on phones.</div>
   </div>
 
   <canvas id="c"></canvas>

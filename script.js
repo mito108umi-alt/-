@@ -1,7 +1,7 @@
-// script.js — bird.png sprite animation + phone camera + capture
+// script.js — bird.png sprite animation + timed flock behaviour (50 birds, 15s)
 
 const settings = {
-  birdCount: 20, // default target flock size for performance
+  birdCount: 50,
   birdSize: 1.0,
   flightSpeed: 1.0,
   flapBaseSpeed: 1.0,
@@ -10,7 +10,7 @@ const settings = {
   glideMaxSec: 3.6,
   areaRadius: 28,
   cameraDistance: 35,
-  maxBirds: 30
+  maxBirds: 50
 };
 
 // --------------------
@@ -19,18 +19,13 @@ const settings = {
 const video = document.getElementById("cameraFeed");
 const canvas = document.getElementById("c");
 const startBtn = document.getElementById("startCam");
-const captureBtn = document.getElementById("capture");
 const resetCamBtn = document.getElementById("resetCam");
 
 // --------------------
-// Three.js
+// Three.js renderer + scene + camera
 // --------------------
-const renderer = new THREE.WebGLRenderer({
-  canvas,
-  antialias: true,
-  alpha: true
-});
-
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
+// Keep pixel ratio reasonable for mobile; set to 1 if performance issues
 renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.outputEncoding = THREE.sRGBEncoding;
@@ -38,470 +33,281 @@ renderer.outputEncoding = THREE.sRGBEncoding;
 const scene = new THREE.Scene();
 scene.background = null;
 
-const camera = new THREE.PerspectiveCamera(
-  55,
-  window.innerWidth / window.innerHeight,
-  0.1,
-  2000
-);
-
+const camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerHeight, 0.1, 2000);
 camera.position.set(0, 8, settings.cameraDistance);
 camera.lookAt(0, 3, 0);
 
-// --------------------
-// Camera orbit (kept light)
-// --------------------
-let isPointerDown = false;
-let lastX = 0;
-let lastY = 0;
-let yaw = 0;
-let pitch = -0.15;
+// orbit input
+let isPointerDown = false, lastX = 0, lastY = 0;
+let yaw = 0, pitch = -0.15;
+function onPointerDown(e){ isPointerDown = true; lastX = e.clientX; lastY = e.clientY; }
+function onPointerMove(e){ if (!isPointerDown) return; const dx = (e.clientX - lastX) * 0.002; const dy = (e.clientY - lastY) * 0.002; lastX = e.clientX; lastY = e.clientY; yaw -= dx; pitch = Math.max(-0.6, Math.min(0.3, pitch - dy)); }
+function onPointerUp(){ isPointerDown = false; }
+window.addEventListener('pointerdown', onPointerDown);
+window.addEventListener('pointermove', onPointerMove);
+window.addEventListener('pointerup', onPointerUp);
 
-function onPointerDown(e) {
-  isPointerDown = true;
-  lastX = e.clientX;
-  lastY = e.clientY;
-}
-
-function onPointerMove(e) {
-  if (!isPointerDown) return;
-  const dx = (e.clientX - lastX) * 0.002;
-  const dy = (e.clientY - lastY) * 0.002;
-  lastX = e.clientX;
-  lastY = e.clientY;
-  yaw -= dx;
-  pitch = Math.max(-0.6, Math.min(0.3, pitch - dy));
-}
-
-function onPointerUp() { isPointerDown = false; }
-window.addEventListener("pointerdown", onPointerDown);
-window.addEventListener("pointermove", onPointerMove);
-window.addEventListener("pointerup", onPointerUp);
+// lighting (kept for visual consistency; sprites are unaffected by lights)
+const hemi = new THREE.HemisphereLight(0xffffff, 0xbccfe8, 0.85); scene.add(hemi);
+const dir = new THREE.DirectionalLight(0xffffff, 0.9); dir.position.set(-30,60,20); scene.add(dir);
+const ambient = new THREE.AmbientLight(0xffffff, 0.25); scene.add(ambient);
 
 // --------------------
-// bird.png frames
+// bird.png frames -> CanvasTexture (shared)
 // --------------------
-const birdImage = new Image();
-birdImage.src = "./bird.png";
+const birdImage = new Image(); birdImage.src = './bird.png';
+const birdTextures = []; let birdImagesReady = false;
 
-const birdTextures = [];
-let birdImagesReady = false;
+birdImage.onload = () => { createBirdFrameTextures(); birdImagesReady = true; createBirds(settings.birdCount); };
+birdImage.onerror = () => { console.error('bird.png を読み込めませんでした。パスを確認してください: ./bird.png'); };
 
-birdImage.onload = () => {
-  createBirdFrameTextures();
-  birdImagesReady = true;
-  createBirds(settings.birdCount);
-};
-
-birdImage.onerror = () => {
-  console.error("bird.png を読み込めませんでした。パスを確認してください: ./bird.png");
-  alert("bird.png を読み込めませんでした。\nscript.js と同じ場所に bird.png があるか確認してください。");
-};
-
-function createBirdFrameTextures() {
+function createBirdFrameTextures(){
   birdTextures.length = 0;
-  const sourceWidth = birdImage.naturalWidth;
-  const sourceHeight = birdImage.naturalHeight;
-  if (!sourceWidth || !sourceHeight) {
-    console.error("bird.png のサイズを取得できませんでした。");
-    return;
-  }
-  const frameHeight = sourceHeight / 3;
-  for (let i = 0; i < 3; i++) {
-    const frameCanvas = document.createElement("canvas");
-    frameCanvas.width = sourceWidth;
-    frameCanvas.height = Math.round(frameHeight);
-    const ctx = frameCanvas.getContext("2d");
-    ctx.clearRect(0, 0, frameCanvas.width, frameCanvas.height);
-    ctx.drawImage(birdImage, 0, i * frameHeight, sourceWidth, frameHeight, 0, 0, sourceWidth, frameCanvas.height);
-    const texture = new THREE.CanvasTexture(frameCanvas);
-    texture.encoding = THREE.sRGBEncoding;
-    texture.minFilter = THREE.LinearFilter;
-    texture.magFilter = THREE.LinearFilter;
-    texture.generateMipmaps = false;
-    texture.format = THREE.RGBAFormat;
-    birdTextures.push(texture);
+  const w = birdImage.naturalWidth, h = birdImage.naturalHeight; if (!w || !h) { console.error('bird.png サイズ取得失敗'); return; }
+  const fh = Math.round(h / 3);
+  for (let i=0;i<3;i++){
+    const c = document.createElement('canvas'); c.width = w; c.height = fh; const ctx = c.getContext('2d'); ctx.clearRect(0,0,c.width,c.height);
+    ctx.drawImage(birdImage, 0, i*fh, w, fh, 0, 0, w, fh);
+    const tex = new THREE.CanvasTexture(c); tex.encoding = THREE.sRGBEncoding; tex.minFilter = THREE.LinearFilter; tex.magFilter = THREE.LinearFilter; tex.generateMipmaps=false; tex.format = THREE.RGBAFormat;
+    birdTextures.push(tex);
   }
 }
 
 // --------------------
-// Global animation phases
+// Phase timings (15s total)
 // --------------------
-const PHASE = {
-  WAIT: 0,
-  APPROACH: 1,
-  GATHER: 2,
-  FORM: 3,
-  CIRCLE: 4,
-  EXIT: 5
-};
+const PHASE = { WAIT:0, APPROACH:1, GATHER:2, FORM:3, CIRCLE:4, EXIT:5, END:6 };
+const phaseTimes = { waitEnd:0.2, approachEnd:1.2, gatherEnd:4.0, formEnd:5.0, circleEnd:13.0, exitEnd:15.0 };
 
-const phaseTimes = {
-  waitEnd: 0.2,
-  approachEnd: 1.0,
-  gatherEnd: 3.0,
-  formEnd: 4.0,
-  circleEnd: 8.0,
-  exitEnd: 10.0
-};
-
-let elapsedTime = 0;
-let currentPhase = PHASE.WAIT;
-
-// flock center (reused)
-const flockCenter = new THREE.Vector3(0, 5, 0);
+function computePhase(now){ if (now < phaseTimes.waitEnd) return PHASE.WAIT; if (now < phaseTimes.approachEnd) return PHASE.APPROACH; if (now < phaseTimes.gatherEnd) return PHASE.GATHER; if (now < phaseTimes.formEnd) return PHASE.FORM; if (now < phaseTimes.circleEnd) return PHASE.CIRCLE; if (now < phaseTimes.exitEnd) return PHASE.EXIT; return PHASE.END; }
 
 // --------------------
-// Bird class (sprite-based) - with reusable vectors to avoid allocations
+// flock center preallocated
+// --------------------
+const flockCenter = new THREE.Vector3();
+
+// circle params
+const circleBase = new THREE.Vector3(0, 6, 6);
+const circleRadiusX = 32; // wide horizontal sweep
+const circleRadiusZ = 18; // depth sweep
+
+// --------------------
+// Bird class (sprite) with preallocated vectors
 // --------------------
 class Bird extends THREE.Group {
-  constructor(params = {}) {
+  constructor(params={}){
     super();
-    this.params = Object.assign({
-      size: 1.0,
-      flapSpeed: 1.0,
-      phaseOffset: Math.random() * Math.PI * 2,
-      positionOffset: new THREE.Vector3(randRange(-2, 2), randRange(-1.2, 1.2), randRange(-2, 2)),
-      pathOffset: Math.random() * 100,
-      id: 0,
-      spawnTime: 0
-    }, params);
-
-    // reusable vectors
+    this.params = Object.assign({ size:1.0, flapSpeed:1.0, phaseOffset:Math.random()*Math.PI*2, pathOffset:Math.random()*100, id:0, spawnTime:9999 }, params);
+    // preallocate
+    this._offset = new THREE.Vector3(); // assigned later
     this._target = new THREE.Vector3();
-    this._desired = new THREE.Vector3();
-    this._forward = new THREE.Vector3();
-
     this.velocity = new THREE.Vector3();
+
     this.localSpeedMul = randRange(0.85, 1.25);
-    this.flapTime = Math.random() * 10;
+    this.flapTime = Math.random()*10;
     this.frameIndex = 0;
-    this.spawned = false; // becomes true after spawnTime
+    this._spawned = false;
+    this._birthTime = 0;
 
-    // per-bird offset within flock
-    this.flkOffset = new THREE.Vector3(randRange(-2.0, 2.0), randRange(-1.2, 1.2), randRange(-2.0, 2.0));
-
-    // Sprite material
-    this.material = new THREE.SpriteMaterial({ map: birdTextures[0], transparent: true, alphaTest: 0.02, depthWrite: false });
-    this.sprite = new THREE.Sprite(this.material);
-
+    // sprite
+    const mat = new THREE.SpriteMaterial({ map: birdTextures[0] || null, transparent:true, alphaTest:0.02, depthWrite:false });
+    this.sprite = new THREE.Sprite(mat);
     const baseSize = 5.5 * this.params.size;
-    this.baseScale = baseSize;
     this.sprite.scale.set(baseSize * 1.7, baseSize, 1);
     this.add(this.sprite);
 
-    // set invisible until spawn
     this.visible = false;
   }
 
-  // spawn initialization
-  spawn(now) {
-    this.spawned = true;
-    this.visible = true;
-    // place far in z and slightly randomized x,y
-    const farZ = settings.areaRadius * 1.8 + randRange(0, 8);
-    this.position.set(randRange(-2, 2) + this.params.positionOffset.x, randRange(1.5, 3.5) + this.params.positionOffset.y, farZ + this.params.positionOffset.z);
-    // start very small
-    const s = this.baseScale * 0.18;
-    this.sprite.scale.set(s * 1.7, s, 1);
-    // reset velocity small
-    this.velocity.set(0, 0, 0);
+  spawn(now){
+    this._spawned = true; this._birthTime = now; this.visible = true;
+    // initial far position
+    this.position.set(this._offset.x, 2 + this._offset.y, 80 + this._offset.z);
+    // tiny initial scale
+    this.sprite.scale.set(0.05*1.7, 0.05, 1);
+    this.flapTime += randRange(0,1.0);
   }
 
-  update(dt, t) {
-    // if not spawned yet, skip
-    if (!this.spawned) return;
+  update(dt, t, globalElapsed, flockCenterPos, phase, spreadFactor){
+    if (!this._spawned){ if (globalElapsed >= this.params.spawnTime) this.spawn(globalElapsed); else return; }
 
-    // wing/flap
+    // flap animation
     const flapSpeed = this.params.flapSpeed * settings.flapBaseSpeed * this.localSpeedMul;
     this.flapTime += dt * flapSpeed * 3.8;
-    const flapCycle = [0, 1, 2, 1];
-    const idx = Math.floor(this.flapTime) % flapCycle.length;
-    const nextFrame = flapCycle[idx];
-    if (nextFrame !== this.frameIndex) {
-      this.frameIndex = nextFrame;
-      this.material.map = birdTextures[this.frameIndex];
-      this.material.needsUpdate = true;
-    }
+    const cycle = [0,1,2,1];
+    const idx = Math.floor(this.flapTime) % cycle.length;
+    const next = cycle[idx];
+    if (next !== this.frameIndex){ this.frameIndex = next; this.sprite.material.map = birdTextures[this.frameIndex]; this.sprite.material.needsUpdate = true; }
 
-    // spawn growth: during 1s after spawn, scale up smoothly
-    const sinceSpawn = Math.max(0, elapsedTime - this.params.spawnTime);
-    if (sinceSpawn < 1.0) {
-      const p = THREE.MathUtils.smoothstep(sinceSpawn / 1.0, 0, 1);
-      const desiredScale = this.baseScale * (0.7 + (this.params.size - 1) * 0.1);
-      const s = THREE.MathUtils.lerp(this.baseScale * 0.18, desiredScale, p);
-      this.sprite.scale.set(s * 1.7, s, 1);
-    }
+    // compute desired target: flockCenter + offset * spreadFactor + small wobble
+    this._target.copy(flockCenterPos);
+    // rotated offset: allow fan distribution via stored _offset
+    const ox = this._offset.x * spreadFactor + Math.cos(globalElapsed*0.6 + this.params.pathOffset*0.01)*0.8;
+    const oy = this._offset.y * spreadFactor + Math.sin(globalElapsed*0.7 + this.params.id*0.2)*0.6;
+    const oz = this._offset.z * spreadFactor + Math.sin(globalElapsed*0.45 + this.params.pathOffset*0.03)*1.2;
+    this._target.x += ox; this._target.y += oy; this._target.z += oz;
 
-    // compute target depending on global phase
-    if (currentPhase < PHASE.FORM) {
-      // APPROACH / GATHER: use procedural path (keeps original flavor)
-      const time = t * 0.4 + this.params.pathOffset;
-      const rx = Math.sin(time * 0.9 + this.params.id) * settings.areaRadius * 0.7 + Math.sin(time * 0.33 + this.params.id * 2) * 6;
-      const rz = Math.cos(time * 0.7 + this.params.id * 1.3) * settings.areaRadius * 0.5 + Math.cos(time * 0.23 + this.params.id * 0.9) * 6;
-      const ry = Math.sin(time * 0.5 + this.params.id * 0.6) * 3 + Math.sin(time * 0.12 + this.params.id * 0.7) * 1.6 + 6;
+    // smooth position
+    this.position.lerp(this._target, 0.12);
 
-      this._target.set(rx, ry, rz);
+    // estimate forward = target - position into tmp vector (reuse velocity for smoothing)
+    const forward = this.velocity;
+    forward.subVectors(this._target, this.position);
+    this.velocity.lerp(forward, 0.08);
 
-      // slight per-bird jitter
-      this._target.x += this.params.positionOffset.x * 0.25;
-      this._target.y += this.params.positionOffset.y * 0.25;
-      this._target.z += this.params.positionOffset.z * 0.25;
+    // bank rotation limited ±25deg
+    const bank = THREE.MathUtils.clamp(-this.velocity.x * 0.8, -THREE.MathUtils.degToRad(25), THREE.MathUtils.degToRad(25));
+    this.sprite.material.rotation = THREE.MathUtils.lerp(this.sprite.material.rotation || 0, bank, 0.08);
 
-      // if in GATHER phase and after 3s->4s transition we start blending toward flock center
-      if (elapsedTime >= phaseTimes.gatherEnd) {
-        // transition alpha 0 at gatherEnd, 1 at formEnd
-        const a = THREE.MathUtils.clamp((elapsedTime - phaseTimes.gatherEnd) / (phaseTimes.formEnd - phaseTimes.gatherEnd), 0, 1);
-        // compute flock target
-        this._desired.copy(flockCenter).add(this.flkOffset);
-        // blend
-        this._target.lerp(this._desired, a);
-      }
-    } else {
-      // FORM/CIRCLE/EXIT phases: move relative to flock center + offsets + oscillation
-      // compute ellipse motion for flockCenter in animate(); here we just use flockCenter
-      // per-bird desired position
-      this._target.copy(flockCenter).add(this.flkOffset);
-      // add small local sin/cos oscillation for natural look
-      const w = 2.0 + this.params.id * 0.05;
-      this._target.x += Math.sin(elapsedTime * (0.6 + (this.params.id % 3) * 0.02) + this.params.id) * 0.6;
-      this._target.y += Math.cos(elapsedTime * (0.8 + (this.params.id % 4) * 0.03) + this.params.id * 0.7) * 0.4;
-      this._target.z += Math.sin(elapsedTime * (0.4 + (this.params.id % 5) * 0.01) + this.params.id * 0.9) * 0.6;
-    }
-
-    // move toward target with smoothing
-    this._desired.copy(this._target).sub(this.position).multiplyScalar(0.6 * dt * (0.6 + this.localSpeedMul * 0.6));
-    this.velocity.lerp(this._desired, 0.55);
-    this.position.add(this.velocity);
-
-    // orientation: bank toward movement direction
-    this._forward.copy(this.velocity);
-    this._forward.y *= 0.6;
-    if (this._forward.lengthSq() > 1e-6) {
-      const bank = THREE.MathUtils.clamp(-this._forward.x * 0.8, -0.4363, 0.4363); // +-25deg in radians
-      this.sprite.material.rotation = THREE.MathUtils.lerp(this.sprite.material.rotation || 0, bank, 0.08);
-    }
-
-    // depth-based scale: birds further in z appear smaller
-    // map z to scale factor (assume z ~ -area..+area, but our z is positive further away)
-    const z = this.position.z;
-    // heuristic: nearer (smaller z) -> larger scale; farther (larger z) -> smaller
-    const depthScale = THREE.MathUtils.clamp(1.2 - (z / (settings.areaRadius * 2.2)), 0.45, 1.6);
-    const desiredScale = this.baseScale * (0.85 + (this.params.size - 1) * 0.12) * depthScale;
+    // depth-based scaling: map z to [far..near]
+    const minZ = -10; const maxZ = 120; // representable depth range
+    const depthNorm = THREE.MathUtils.clamp((maxZ - this.position.z) / (maxZ - minZ), 0, 1);
+    // map to scale multiplier: far=0.5 mid~0.85 near=1.5
+    const scaleMul = THREE.MathUtils.lerp(0.5, 1.5, depthNorm);
+    const baseSize = 5.5 * this.params.size;
+    const desiredScaleY = baseSize * scaleMul;
     // smooth scale
-    const curSx = this.sprite.scale.x;
-    const curSy = this.sprite.scale.y;
-    const targetSx = desiredScale * 1.7;
-    const targetSy = desiredScale;
-    this.sprite.scale.x = THREE.MathUtils.lerp(curSx, targetSx, 0.08);
-    this.sprite.scale.y = THREE.MathUtils.lerp(curSy, targetSy, 0.08);
+    const curScaleY = THREE.MathUtils.lerp(this.sprite.scale.y, desiredScaleY, 0.08);
+    this.sprite.scale.set(curScaleY * 1.7, curScaleY, 1);
 
-    // if exit phase, progressively move out
-    if (currentPhase === PHASE.EXIT) {
-      // accelerate outward (toward top-right-away)
-      const outDir = new THREE.Vector3(1.3, 0.6, -1.6).normalize();
-      this.position.addScaledVector(outDir, dt * 18 * this.localSpeedMul);
-      // hide when clearly off-screen (z negative deep enough or x large)
-      if (this.position.z < -50 || Math.abs(this.position.x) > 150 || this.position.y > 120) {
-        this.visible = false;
-      }
-    }
+    // small bob
+    this.sprite.position.y = Math.sin(t*2 + this.params.phaseOffset) * 0.08;
   }
 }
 
-// --------------------
-// Utility
-// --------------------
-function randRange(a, b) { return a + Math.random() * (b - a); }
+function randRange(a,b){ return a + Math.random()*(b-a); }
 
 // --------------------
-// Create birds (with spawn times)
+// spawn scheduling and offset generation with minimum separation
 // --------------------
 let birds = [];
-
-function clearBirds() {
-  birds.forEach((bird) => {
-    if (bird.parent) bird.parent.remove(bird);
-    if (bird.material) bird.material.dispose();
-  });
-  birds = [];
-}
-
-function createBirds(n) {
-  clearBirds();
-  const target = Math.min(settings.maxBirds, Math.max(1, n));
-
-  // schedule spawn times: first bird in 0.2-0.5s, others between 1-3s at ~0.1-0.25s intervals
-  const spawnTimes = [];
-  const first = randRange(0.2, 0.5);
-  spawnTimes.push(first);
+const minimumSeparation = 3.5;
+function scheduleSpawnTimes(count){
+  const times = [];
+  if (count <= 0) return times;
+  const first = randRange(0.2, 0.5); times.push(first);
+  // distribute remaining between 1.0 and 4.0 with small gaps 0.05..0.12
   let t = 1.0;
-  for (let i = 1; i < target; i++) {
-    t += randRange(0.08, 0.25);
-    // clamp to gatherEnd
-    t = Math.min(t, phaseTimes.gatherEnd - 0.02);
-    spawnTimes.push(t);
+  for (let i=1;i<count;i++){
+    const gap = randRange(0.05, 0.12);
+    t += gap;
+    const spawn = Math.min(4.0, t + randRange(-0.02,0.02));
+    times.push(spawn);
+    if (t >= 4.0) t = 4.0;
   }
+  return times;
+}
 
-  for (let i = 0; i < target; i++) {
-    const bird = new Bird({
-      size: settings.birdSize * randRange(0.82, 1.15),
-      flapSpeed: randRange(0.85, 1.2),
-      id: i,
-      spawnTime: spawnTimes[i] || 1.0
-    });
-    bird.visible = false;
-    scene.add(bird);
-    birds.push(bird);
+function generateFlockOffsets(count){
+  const offsets = [];
+  const attemptsLimit = 30;
+  for (let i=0;i<count;i++){
+    let attempt = 0; let ok = false; let ox=0, oy=0, oz=0;
+    while(attempt < attemptsLimit && !ok){
+      // generate in fan/ellipse distribution
+      const theta = randRange(0, Math.PI*2);
+      const rX = randRange(12, 20); // radius multiplier along X
+      const rZ = randRange(12, 18);
+      // bias so more birds are forward than extreme back
+      const radiusX = randRange(8, rX);
+      const radiusZ = randRange(6, rZ);
+      ox = Math.cos(theta) * radiusX * randRange(0.6,1.0);
+      oz = Math.sin(theta) * radiusZ * randRange(0.6,1.0);
+      oy = randRange(-8, 12);
+      ok = true;
+      // check minimum separation in X/Y plane primarily
+      for (let j=0;j<offsets.length;j++){
+        const other = offsets[j];
+        const dx = ox - other.x; const dy = oy - other.y; const dist2 = dx*dx + dy*dy;
+        if (dist2 < minimumSeparation*minimumSeparation){ ok = false; break; }
+      }
+      attempt++;
+    }
+    if (!ok){ // accept last generated to avoid infinite loop
+      // if failed, jitter around a less crowded area
+      ox += randRange(-3,3); oy += randRange(-2,2); oz += randRange(-3,3);
+    }
+    offsets.push(new THREE.Vector3(ox, oy, oz));
+  }
+  return offsets;
+}
+
+function clearBirds(){ birds.forEach(b=>{ if(b.parent) b.parent.remove(b); if(b.sprite && b.sprite.material) b.sprite.material.dispose(); }); birds = []; }
+
+function createBirds(n){
+  clearBirds();
+  const finalN = Math.min(n, settings.maxBirds);
+  const spawnTimes = scheduleSpawnTimes(finalN);
+  const offsets = generateFlockOffsets(finalN);
+  for (let i=0;i<finalN;i++){
+    const b = new Bird({ size: settings.birdSize * randRange(0.9,1.15), flapSpeed: randRange(0.85,1.2), id:i });
+    b.params.spawnTime = spawnTimes[i] !== undefined ? spawnTimes[i] : randRange(1.0,4.0);
+    b._offset.copy(offsets[i]);
+    b.position.set(0,0,9999); b.visible=false; scene.add(b); birds.push(b);
   }
 }
 
-// --------------------
-// UI bindings (kept)
-// --------------------
-const countEl = document.getElementById("count");
-const flapSpeedEl = document.getElementById("flapSpeed");
-const flapAmountEl = document.getElementById("flapAmount");
-const flightSpeedEl = document.getElementById("flightSpeed");
-
-if (countEl) {
-  countEl.value = settings.birdCount;
-  countEl.oninput = (e) => {
-    const val = Math.min(settings.maxBirds, parseInt(e.target.value, 10));
-    settings.birdCount = val;
-    createBirds(val);
-  };
-}
-if (flapSpeedEl) { flapSpeedEl.value = settings.flapBaseSpeed; flapSpeedEl.oninput = (e) => { settings.flapBaseSpeed = parseFloat(e.target.value); }; }
-if (flapAmountEl) { flapAmountEl.value = settings.flapBaseAmount; flapAmountEl.oninput = (e) => { settings.flapBaseAmount = parseFloat(e.target.value); }; }
-if (flightSpeedEl) { flightSpeedEl.value = settings.flightSpeed; flightSpeedEl.oninput = (e) => { settings.flightSpeed = parseFloat(e.target.value); }; }
-if (resetCamBtn) { resetCamBtn.onclick = () => { yaw = 0; pitch = -0.15; camera.position.set(0, 8, settings.cameraDistance); }; }
+// if images already ready
+if (birdImagesReady) createBirds(settings.birdCount);
 
 // --------------------
-// Phone camera (kept)
+// Camera start/stop (unchanged behavior)
 // --------------------
 let stream = null;
-async function startCamera() {
-  try {
-    const constraints = { video: { facingMode: { ideal: "environment" } }, audio: false };
-    stream = await navigator.mediaDevices.getUserMedia(constraints);
-    video.srcObject = stream;
-    await video.play();
-    captureBtn.disabled = false;
-    startBtn.textContent = 'Stop Camera';
-  } catch (err) {
-    console.error('Camera access error', err);
-    alert('カメラへのアクセスが必要です。設定を確認してください。\n' + (err && err.message ? err.message : ''));
-  }
-}
-function stopCamera(){ if (!stream) return; stream.getTracks().forEach(track => track.stop()); stream = null; video.pause(); video.srcObject = null; captureBtn.disabled = true; startBtn.textContent = 'Start Camera'; }
-startBtn.addEventListener('click', async ()=>{ if (stream) { stopCamera(); return; } await startCamera(); });
+async function startCamera(){
+  try{ const constraints = { video: { facingMode: { ideal: 'environment' } }, audio:false }; stream = await navigator.mediaDevices.getUserMedia(constraints); video.srcObject = stream; await video.play(); startBtn.textContent = 'Stop Camera'; }catch(err){ console.error('Camera access error', err); alert('カメラへのアクセスが必要です。設定を確認してください。\n' + (err && err.message ? err.message : '')); } }
+function stopCamera(){ if(!stream) return; stream.getTracks().forEach(t=>t.stop()); stream=null; video.pause(); video.srcObject=null; startBtn.textContent='Start Camera'; }
+startBtn.addEventListener('click', async ()=>{ if (stream){ stopCamera(); return; } await startCamera(); });
+resetCamBtn.addEventListener('click', ()=>{ yaw=0; pitch=-0.15; camera.position.set(0,8,settings.cameraDistance); });
 
 // --------------------
-// Capture (kept)
+// main animation with phase-controlled flock
 // --------------------
-captureBtn.addEventListener('click', ()=>{
-  try {
-    const webglCanvas = renderer.domElement;
-    const w = webglCanvas.width; const h = webglCanvas.height;
-    const out = document.createElement('canvas'); out.width = w; out.height = h; const ctx = out.getContext('2d');
-    try { ctx.drawImage(video, 0, 0, w, h); } catch (e) { console.warn('Video draw warning', e); ctx.fillStyle = '#000'; ctx.fillRect(0,0,w,h); }
-    ctx.drawImage(webglCanvas, 0, 0, w, h);
-    out.toBlob((blob) => { if (!blob) { alert('キャプチャに失敗しました'); return; } const url = URL.createObjectURL(blob); window.open(url, '_blank'); setTimeout(()=>URL.revokeObjectURL(url), 60000); }, 'image/jpeg', 0.92);
-  } catch(e){ console.error('Capture failed', e); alert('キャプチャに失敗しました: ' + (e && e.message)); }
-});
+const clock = new THREE.Clock(); let elapsed = 0;
 
-// --------------------
-// Main animation with phase control
-// --------------------
-const clock = new THREE.Clock();
-let elapsed = 0;
+function smoothstep(a,b,t){ const x = THREE.MathUtils.clamp((t-a)/(b-a),0,1); return x*x*(3-2*x); }
 
-function updatePhase(now) {
-  elapsedTime = now;
-  if (now < phaseTimes.waitEnd) currentPhase = PHASE.WAIT;
-  else if (now < phaseTimes.approachEnd) currentPhase = PHASE.APPROACH;
-  else if (now < phaseTimes.gatherEnd) currentPhase = PHASE.GATHER;
-  else if (now < phaseTimes.formEnd) currentPhase = PHASE.FORM;
-  else if (now < phaseTimes.circleEnd) currentPhase = PHASE.CIRCLE;
-  else currentPhase = PHASE.EXIT;
-}
+function animate(){ requestAnimationFrame(animate); const dt = Math.min(0.06, clock.getDelta()); elapsed += dt; const phase = computePhase(elapsed);
 
-function animate() {
-  requestAnimationFrame(animate);
-  const dt = Math.min(0.06, clock.getDelta());
-  elapsed += dt; // elapsed is used for bird update time scaling
-
-  // update current overall time and phase
-  updatePhase(elapsed);
-
-  // compute flockCenter movement depending on phase
-  if (currentPhase === PHASE.WAIT) {
-    // before anything, push flock center far away
-    flockCenter.set(0, 6, settings.areaRadius * 1.6);
-  } else if (currentPhase === PHASE.APPROACH) {
-    // move center a bit toward screen center as first bird approaches
-    const p = THREE.MathUtils.clamp((elapsed - phaseTimes.waitEnd) / (phaseTimes.approachEnd - phaseTimes.waitEnd), 0, 1);
-    const target = new THREE.Vector3(0, 5, 8);
-    flockCenter.lerp(target, p * 0.25 + 0.05); // slight movement
-  } else if (currentPhase === PHASE.GATHER) {
-    // gradually move center forward while birds spawn
-    const p = THREE.MathUtils.clamp((elapsed - phaseTimes.approachEnd) / (phaseTimes.gatherEnd - phaseTimes.approachEnd), 0, 1);
-    flockCenter.lerp(new THREE.Vector3(0, 5, 6), 0.02 + p * 0.06);
-  } else if (currentPhase === PHASE.FORM) {
-    // during formation transition, move center to start of circle path
-    const t = THREE.MathUtils.clamp((elapsed - phaseTimes.gatherEnd) / (phaseTimes.formEnd - phaseTimes.gatherEnd), 0, 1);
-    const start = flockCenter.clone();
-    const circleStart = new THREE.Vector3(-12, 5, 6);
-    flockCenter.lerp(circleStart, t * 0.18 + 0.02);
-  } else if (currentPhase === PHASE.CIRCLE || currentPhase === PHASE.EXIT) {
-    // circle motion: large right-handed clockwise orbit across screen
-    const circleT = THREE.MathUtils.clamp((elapsed - phaseTimes.formEnd) / (phaseTimes.circleEnd - phaseTimes.formEnd), 0, 1);
-    const angle = -Math.PI * 1.2 * circleT + Math.PI * 0.5; // clockwise sweep
-    const rx = 18 * Math.cos(angle);
-    const rz = 12 * Math.sin(angle) + 6; // offset forward a bit
-    const ry = 5 + Math.sin(angle * 0.6) * 2.2;
-    flockCenter.set(rx, ry, rz);
-    // if EXIT phase, push further out
-    if (currentPhase === PHASE.EXIT) {
-      const exitT = THREE.MathUtils.clamp((elapsed - phaseTimes.circleEnd) / (phaseTimes.exitEnd - phaseTimes.circleEnd), 0, 1);
-      // move flock center up/right/backwards
-      flockCenter.x += 80 * exitT;
-      flockCenter.y += 30 * exitT;
-      flockCenter.z -= 60 * exitT;
-    }
+  // compute spreadFactor depending on phase and smooth interpolation
+  let spreadFactor = 1.0;
+  if (phase === PHASE.WAIT || phase === PHASE.APPROACH || phase === PHASE.GATHER) {
+    // small spread while gathering
+    const p = THREE.MathUtils.clamp((elapsed - phaseTimes.approachEnd)/(phaseTimes.gatherEnd - phaseTimes.approachEnd),0,1);
+    spreadFactor = THREE.MathUtils.lerp(0.35, 0.55, p); // tighter earlier
+  } else if (phase === PHASE.FORM){
+    spreadFactor = 0.6; // form end
+  } else if (phase === PHASE.CIRCLE){
+    // ramp from 0.6 at t=phaseTimes.formEnd to 1.0 at circle midpoint
+    const t0 = phaseTimes.formEnd; const t1 = (phaseTimes.formEnd + phaseTimes.circleEnd)/2; const t = THREE.MathUtils.clamp((elapsed - t0)/(t1 - t0),0,1);
+    spreadFactor = THREE.MathUtils.lerp(0.6, 1.0, smoothstep(0,1,t));
+  } else if (phase === PHASE.EXIT){
+    spreadFactor = 1.0;
   }
 
-  // spawn birds when their spawnTime arrives
-  for (let i = 0; i < birds.length; i++) {
-    const b = birds[i];
-    if (!b.spawned && elapsed >= (b.params.spawnTime || 0)) {
-      b.spawn();
-    }
-    // update each bird (pass dt and elapsed)
-    b.update(dt, elapsed * settings.flightSpeed);
+  // update flockCenter depending on phase
+  if (phase === PHASE.WAIT){ flockCenter.set(0,6,30); }
+  else if (phase === PHASE.APPROACH){ const p = THREE.MathUtils.clamp((elapsed - 0.2)/(1.2 - 0.2),0,1); flockCenter.lerpVectors(new THREE.Vector3(0,6,30), circleBase, p); }
+  else if (phase === PHASE.GATHER){ flockCenter.copy(circleBase); }
+  else if (phase === PHASE.FORM){ // small transition to starting circle
+    const p = THREE.MathUtils.clamp((elapsed - phaseTimes.gatherEnd)/(phaseTimes.formEnd - phaseTimes.gatherEnd),0,1); flockCenter.lerpVectors(circleBase, circleBase, p);
   }
+  else if (phase === PHASE.CIRCLE){ const t = (elapsed - phaseTimes.formEnd)/(phaseTimes.circleEnd - phaseTimes.formEnd); const angle = -t * Math.PI * 2; flockCenter.x = circleRadiusX * Math.cos(angle); flockCenter.y = circleBase.y + Math.sin(angle * 0.6) * 3.0; flockCenter.z = circleBase.z + circleRadiusZ * Math.sin(angle); }
+  else if (phase === PHASE.EXIT){ const p = THREE.MathUtils.clamp((elapsed - phaseTimes.circleEnd)/(phaseTimes.exitEnd - phaseTimes.circleEnd),0,1); const exitTarget = new THREE.Vector3(40, 22, 120); flockCenter.lerpVectors(flockCenter, exitTarget, smoothstep(0,1,p)); }
 
-  // camera orbit smoothing
-  const radius = settings.cameraDistance;
-  const cx = Math.sin(yaw) * radius;
-  const cz = Math.cos(yaw) * radius;
-  const cy = THREE.MathUtils.lerp(camera.position.y, 6 + pitch * 6 + Math.sin(elapsed * 0.2) * 1.4, 0.08);
-  camera.position.set(cx, cy, cz);
-  camera.lookAt(0, 3, 0);
+  // update birds
+  for (let i=0;i<birds.length;i++){ birds[i].update(dt, elapsed * settings.flightSpeed, elapsed, flockCenter, phase, spreadFactor); }
+
+  // camera orbit
+  const radius = settings.cameraDistance; const cx = Math.sin(yaw)*radius, cz = Math.cos(yaw)*radius; const cy = THREE.MathUtils.lerp(camera.position.y, 6 + pitch*6 + Math.sin(elapsed*0.2)*1.4, 0.08); camera.position.set(cx, cy, cz); camera.lookAt(0, 3, 0);
 
   renderer.render(scene, camera);
 }
 
 animate();
 
-// --------------------
-// Resize & Cleanup
-// --------------------
-window.addEventListener("resize", () => {
-  const w = window.innerWidth; const h = window.innerHeight;
-  renderer.setSize(w, h);
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
-  camera.aspect = w / h; camera.updateProjectionMatrix();
-});
-window.addEventListener("pagehide", () => { stopCamera(); });
+// responsive
+window.addEventListener('resize', ()=>{ const w = window.innerWidth, h = window.innerHeight; renderer.setSize(w,h); renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2)); camera.aspect = w/h; camera.updateProjectionMatrix(); });
+
+// cleanup
+window.addEventListener('pagehide', ()=>{ if (stream) stopCamera(); });

@@ -1,7 +1,9 @@
-// script.js — bird.png sprite animation + timed flock behaviour (50 birds, 15s)
+// script.js — Three.js seagull overlay + phone camera + capture
+// NOTE: open via HTTPS (GitHub Pages) for camera access.
 
+// Settings (easy to change)
 const settings = {
-  birdCount: 50,
+  birdCount: 3,
   birdSize: 1.0,
   flightSpeed: 1.0,
   flapBaseSpeed: 1.0,
@@ -10,304 +12,401 @@ const settings = {
   glideMaxSec: 3.6,
   areaRadius: 28,
   cameraDistance: 35,
-  maxBirds: 50
+  maxBirds: 8,
 };
 
-// --------------------
 // DOM
-// --------------------
-const video = document.getElementById("cameraFeed");
-const canvas = document.getElementById("c");
-const startBtn = document.getElementById("startCam");
-const resetCamBtn = document.getElementById("resetCam");
+const video = document.getElementById('cameraFeed');
+const canvas = document.getElementById('c');
+const startBtn = document.getElementById('startCam');
+const captureBtn = document.getElementById('capture'); // may be null after UI minimization
+const resetCamBtn = document.getElementById('resetCam');
 
-// --------------------
-// Three.js renderer + scene + camera
-// --------------------
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
-// Keep pixel ratio reasonable for mobile; set to 1 if performance issues
+// keep preserveDrawingBuffer false for performance; we composite with drawImage
 renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.outputEncoding = THREE.sRGBEncoding;
 
 const scene = new THREE.Scene();
-scene.background = null;
+scene.background = null; // no background
 
 const camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerHeight, 0.1, 2000);
 camera.position.set(0, 8, settings.cameraDistance);
 camera.lookAt(0, 3, 0);
 
-// orbit input
+// lightweight input orbit (canvas pointer events are off by default; enable on pointerdown via body)
 let isPointerDown = false, lastX = 0, lastY = 0;
 let yaw = 0, pitch = -0.15;
-function onPointerDown(e){ isPointerDown = true; lastX = e.clientX; lastY = e.clientY; }
-function onPointerMove(e){ if (!isPointerDown) return; const dx = (e.clientX - lastX) * 0.002; const dy = (e.clientY - lastY) * 0.002; lastX = e.clientX; lastY = e.clientY; yaw -= dx; pitch = Math.max(-0.6, Math.min(0.3, pitch - dy)); }
-function onPointerUp(){ isPointerDown = false; }
+function onPointerDown(e){ isPointerDown = true; lastX = e.clientX; lastY = e.clientY; document.body.style.cursor='grabbing'; }
+function onPointerMove(e){
+  if (!isPointerDown) return;
+  const dx = (e.clientX - lastX) * 0.002;
+  const dy = (e.clientY - lastY) * 0.002;
+  lastX = e.clientX; lastY = e.clientY;
+  yaw -= dx;
+  pitch = Math.max(-0.6, Math.min(0.3, pitch - dy));
+}
+function onPointerUp(){ isPointerDown = false; document.body.style.cursor='default'; }
 window.addEventListener('pointerdown', onPointerDown);
 window.addEventListener('pointermove', onPointerMove);
 window.addEventListener('pointerup', onPointerUp);
 
-// lighting (kept for visual consistency; sprites are unaffected by lights)
-const hemi = new THREE.HemisphereLight(0xffffff, 0xbccfe8, 0.85); scene.add(hemi);
-const dir = new THREE.DirectionalLight(0xffffff, 0.9); dir.position.set(-30,60,20); scene.add(dir);
-const ambient = new THREE.AmbientLight(0xffffff, 0.25); scene.add(ambient);
+// lighting
+const hemi = new THREE.HemisphereLight(0xffffff, 0xbccfe8, 0.85);
+scene.add(hemi);
+const dir = new THREE.DirectionalLight(0xffffff, 0.9);
+dir.position.set(-30, 60, 20);
+scene.add(dir);
+const ambient = new THREE.AmbientLight(0xffffff, 0.25);
+scene.add(ambient);
 
-// --------------------
-// bird.png frames -> CanvasTexture (shared)
-// --------------------
-const birdImage = new Image(); birdImage.src = './bird.png';
-const birdTextures = []; let birdImagesReady = false;
-
-birdImage.onload = () => { createBirdFrameTextures(); birdImagesReady = true; createBirds(settings.birdCount); };
-birdImage.onerror = () => { console.error('bird.png を読み込めませんでした。パスを確認してください: ./bird.png'); };
-
-function createBirdFrameTextures(){
-  birdTextures.length = 0;
-  const w = birdImage.naturalWidth, h = birdImage.naturalHeight; if (!w || !h) { console.error('bird.png サイズ取得失敗'); return; }
-  const fh = Math.round(h / 3);
-  for (let i=0;i<3;i++){
-    const c = document.createElement('canvas'); c.width = w; c.height = fh; const ctx = c.getContext('2d'); ctx.clearRect(0,0,c.width,c.height);
-    ctx.drawImage(birdImage, 0, i*fh, w, fh, 0, 0, w, fh);
-    const tex = new THREE.CanvasTexture(c); tex.encoding = THREE.sRGBEncoding; tex.minFilter = THREE.LinearFilter; tex.magFilter = THREE.LinearFilter; tex.generateMipmaps=false; tex.format = THREE.RGBAFormat;
-    birdTextures.push(tex);
-  }
-}
-
-// --------------------
-// Phase timings (15s total)
-// --------------------
-const PHASE = { WAIT:0, APPROACH:1, GATHER:2, FORM:3, CIRCLE:4, EXIT:5, END:6 };
-const phaseTimes = { waitEnd:0.2, approachEnd:1.2, gatherEnd:4.0, formEnd:5.0, circleEnd:13.0, exitEnd:15.0 };
-
-function computePhase(now){ if (now < phaseTimes.waitEnd) return PHASE.WAIT; if (now < phaseTimes.approachEnd) return PHASE.APPROACH; if (now < phaseTimes.gatherEnd) return PHASE.GATHER; if (now < phaseTimes.formEnd) return PHASE.FORM; if (now < phaseTimes.circleEnd) return PHASE.CIRCLE; if (now < phaseTimes.exitEnd) return PHASE.EXIT; return PHASE.END; }
-
-// --------------------
-// flock center preallocated
-// --------------------
-const flockCenter = new THREE.Vector3();
-
-// circle params
-const circleBase = new THREE.Vector3(0, 6, 6);
-const circleRadiusX = 32; // wide horizontal sweep
-const circleRadiusZ = 18; // depth sweep
-
-// --------------------
-// Bird class (sprite) with preallocated vectors
-// --------------------
+// Bird implementation (kept from previous version, simplified)
 class Bird extends THREE.Group {
-  constructor(params={}){
+  constructor(params = {}) {
     super();
-    this.params = Object.assign({ size:1.0, flapSpeed:1.0, phaseOffset:Math.random()*Math.PI*2, pathOffset:Math.random()*100, id:0, spawnTime:9999 }, params);
-    // preallocate
-    this._offset = new THREE.Vector3(); // assigned later
-    this._target = new THREE.Vector3();
-    this.velocity = new THREE.Vector3();
+    this.params = Object.assign({
+      size: 1.0,
+      flapSpeed: 1.0,
+      flapAmount: 1.0,
+      phaseOffset: Math.random()*Math.PI*2,
+      glideTime: randRange(settings.glideMinSec, settings.glideMaxSec),
+      inGlide: Math.random() > 0.5 ? true : false,
+      positionOffset: new THREE.Vector3(randRange(-8,8), randRange(0,6), randRange(-8,8)),
+      pathOffset: Math.random()*100,
+      id: 0,
+    }, params);
 
+    const body = new THREE.Group();
+    const bodyGeom = new THREE.SphereGeometry(0.8 * this.params.size, 16, 12);
+    bodyGeom.scale(1, 0.8, 1.4);
+    const bodyMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness:0.7, metalness:0.02 });
+    const bodyMesh = new THREE.Mesh(bodyGeom, bodyMat);
+    body.add(bodyMesh);
+
+    const head = new THREE.Mesh(new THREE.SphereGeometry(0.28 * this.params.size, 12, 8), bodyMat);
+    head.position.set(0, 0.15*this.params.size, 0.95*this.params.size);
+    head.scale.set(0.85,0.85,0.85);
+    head.name = 'head';
+    body.add(head);
+
+    const beak = new THREE.Mesh(new THREE.ConeGeometry(0.08*this.params.size, 0.35*this.params.size, 8), new THREE.MeshStandardMaterial({ color: 0xffcc33 }));
+    beak.rotation.x = Math.PI/2;
+    beak.position.set(0, 0.02*this.params.size, 1.19*this.params.size);
+    body.add(beak);
+
+    const tail = new THREE.Mesh(new THREE.ConeGeometry(0.28*this.params.size, 0.6*this.params.size, 6), bodyMat);
+    tail.rotation.x = -Math.PI/2;
+    tail.position.set(0, -0.05*this.params.size, -0.9*this.params.size);
+    tail.scale.set(1.1, 1.0, 0.7);
+    tail.name='tail';
+    body.add(tail);
+
+    this.body = body;
+    this.add(body);
+
+    this.leftWing = this._buildWing(true);
+    this.rightWing = this._buildWing(false);
+
+    this.leftWing.root.position.set(0.78*this.params.size, 0.05*this.params.size, 0.1*this.params.size);
+    this.rightWing.root.position.set(-0.78*this.params.size, 0.05*this.params.size, 0.1*this.params.size);
+
+    body.add(this.leftWing.root);
+    body.add(this.rightWing.root);
+
+    this._addFeatherDetails(this.leftWing.tip, true);
+    this._addFeatherDetails(this.rightWing.tip, false);
+
+    this.position.copy(this.params.positionOffset);
+    this.rotation.order = 'ZYX';
+
+    this.flapPhase = Math.random()*Math.PI*2 + this.params.phaseOffset;
+    this.glideTimer = this.params.glideTime * Math.random();
+    this.inGlide = this.params.inGlide;
     this.localSpeedMul = randRange(0.85, 1.25);
-    this.flapTime = Math.random()*10;
-    this.frameIndex = 0;
-    this._spawned = false;
-    this._birthTime = 0;
-
-    // sprite
-    const mat = new THREE.SpriteMaterial({ map: birdTextures[0] || null, transparent:true, alphaTest:0.02, depthWrite:false });
-    this.sprite = new THREE.Sprite(mat);
-    const baseSize = 5.5 * this.params.size;
-    this.sprite.scale.set(baseSize * 1.7, baseSize, 1);
-    this.add(this.sprite);
-
-    this.visible = false;
+    this.velocity = new THREE.Vector3();
   }
 
-  spawn(now){
-    this._spawned = true; this._birthTime = now; this.visible = true;
-    // initial far position
-    this.position.set(this._offset.x, 2 + this._offset.y, 80 + this._offset.z);
-    // tiny initial scale
-    this.sprite.scale.set(0.05*1.7, 0.05, 1);
-    this.flapTime += randRange(0,1.0);
+  _buildWing(isLeft=true){
+    const wingMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness:0.8, metalness:0.02, side: THREE.DoubleSide });
+    const root = new THREE.Group();
+    const rootGeom = new THREE.BoxGeometry(0.08*this.params.size, 0.6*this.params.size, 0.12*this.params.size);
+    const rootMesh = new THREE.Mesh(rootGeom, wingMat);
+    rootMesh.position.set(0, -0.3*this.params.size, 0);
+    root.add(rootMesh);
+
+    const mid = new THREE.Group();
+    mid.position.set(0.0, -0.35*this.params.size, 0);
+    const midGeom = new THREE.BoxGeometry(0.06*this.params.size, 1.1*this.params.size, 0.08*this.params.size);
+    const midMesh = new THREE.Mesh(midGeom, wingMat);
+    midMesh.position.set(0, -0.55*this.params.size, 0);
+    mid.add(midMesh);
+
+    const tip = new THREE.Group();
+    tip.position.set(0, -0.85*this.params.size, 0);
+    const tipGeom = new THREE.BoxGeometry(0.04*this.params.size, 1.0*this.params.size, 0.06*this.params.size);
+    const tipMesh = new THREE.Mesh(tipGeom, wingMat);
+    tipMesh.position.set(0, -0.5*this.params.size, 0);
+    tip.add(tipMesh);
+
+    mid.rotation.x = -0.12;
+    tip.rotation.x = -0.08;
+    mid.add(tip);
+    root.add(mid);
+
+    root.rotation.z = isLeft ? -0.25 : 0.25;
+    root.scale.set(isLeft ? 1 : -1, 1, 1);
+
+    return { root, mid, tip, meshes: [rootMesh, midMesh, tipMesh] };
   }
 
-  update(dt, t, globalElapsed, flockCenterPos, phase, spreadFactor){
-    if (!this._spawned){ if (globalElapsed >= this.params.spawnTime) this.spawn(globalElapsed); else return; }
+  _addFeatherDetails(tipGroup, isLeft){
+    const featherMat = new THREE.MeshStandardMaterial({ color: 0xf8fbff, roughness:0.85, side:THREE.DoubleSide });
+    const count = 6;
+    for (let i=0;i<count;i++){
+      const g = new THREE.PlaneGeometry(0.12*this.params.size, 0.45*this.params.size, 1, 1);
+      const m = new THREE.Mesh(g, featherMat);
+      const spread = (i - (count-1)/2) * 0.09 * this.params.size;
+      m.position.set(spread, -0.35*this.params.size, 0.02*this.params.size + i*0.002);
+      m.rotation.set(-0.18 - i*0.02, isLeft ? -0.12 : 0.12, isLeft ? -0.15 : 0.15);
+      tipGroup.add(m);
+    }
+  }
 
-    // flap animation
+  update(dt, t){
     const flapSpeed = this.params.flapSpeed * settings.flapBaseSpeed * this.localSpeedMul;
-    this.flapTime += dt * flapSpeed * 3.8;
-    const cycle = [0,1,2,1];
-    const idx = Math.floor(this.flapTime) % cycle.length;
-    const next = cycle[idx];
-    if (next !== this.frameIndex){ this.frameIndex = next; this.sprite.material.map = birdTextures[this.frameIndex]; this.sprite.material.needsUpdate = true; }
+    this.flapPhase += dt * flapSpeed * 2.0;
 
-    // compute desired target: flockCenter + offset * spreadFactor + small wobble
-    this._target.copy(flockCenterPos);
-    // rotated offset: allow fan distribution via stored _offset
-    const ox = this._offset.x * spreadFactor + Math.cos(globalElapsed*0.6 + this.params.pathOffset*0.01)*0.8;
-    const oy = this._offset.y * spreadFactor + Math.sin(globalElapsed*0.7 + this.params.id*0.2)*0.6;
-    const oz = this._offset.z * spreadFactor + Math.sin(globalElapsed*0.45 + this.params.pathOffset*0.03)*1.2;
-    this._target.x += ox; this._target.y += oy; this._target.z += oz;
+    this.glideTimer -= dt;
+    if (this.glideTimer <= 0) {
+      this.inGlide = !this.inGlide;
+      this.glideTimer = randRange(settings.glideMinSec, settings.glideMaxSec);
+    }
 
-    // smooth position
-    this.position.lerp(this._target, 0.12);
+    const asym = 0.04*Math.sin(t*0.6 + this.params.phaseOffset);
+    const leftPhase = this.flapPhase + 0.05;
+    const rightPhase = this.flapPhase - 0.02;
+    const flapAmount = settings.flapBaseAmount * this.params.flapAmount;
 
-    // estimate forward = target - position into tmp vector (reuse velocity for smoothing)
-    const forward = this.velocity;
-    forward.subVectors(this._target, this.position);
-    this.velocity.lerp(forward, 0.08);
+    function strokeVal(phase){
+      const s = Math.sin(phase);
+      if (s > 0) return Math.pow(s, 0.9) * 1.6;
+      return -Math.pow(Math.abs(s), 1.6) * 0.85;
+    }
 
-    // bank rotation limited ±25deg
-    const bank = THREE.MathUtils.clamp(-this.velocity.x * 0.8, -THREE.MathUtils.degToRad(25), THREE.MathUtils.degToRad(25));
-    this.sprite.material.rotation = THREE.MathUtils.lerp(this.sprite.material.rotation || 0, bank, 0.08);
+    const lv = strokeVal(leftPhase) * flapAmount * (this.inGlide ? 0.9 : 1.0);
+    const rv = strokeVal(rightPhase) * flapAmount * (this.inGlide ? 0.9 : 1.0);
 
-    // depth-based scaling: map z to [far..near]
-    const minZ = -10; const maxZ = 120; // representable depth range
-    const depthNorm = THREE.MathUtils.clamp((maxZ - this.position.z) / (maxZ - minZ), 0, 1);
-    // map to scale multiplier: far=0.5 mid~0.85 near=1.5
-    const scaleMul = THREE.MathUtils.lerp(0.5, 1.5, depthNorm);
-    const baseSize = 5.5 * this.params.size;
-    const desiredScaleY = baseSize * scaleMul;
-    // smooth scale
-    const curScaleY = THREE.MathUtils.lerp(this.sprite.scale.y, desiredScaleY, 0.08);
-    this.sprite.scale.set(curScaleY * 1.7, curScaleY, 1);
+    const rootDownMul = 0.65;
+    const midDelay = 0.18;
+    const tipDelay = 0.35;
 
-    // small bob
-    this.sprite.position.y = Math.sin(t*2 + this.params.phaseOffset) * 0.08;
+    this.leftWing.root.rotation.x = THREE.MathUtils.lerp(this.leftWing.root.rotation.x, ( -lv * rootDownMul - 0.08 ) * 0.9, 0.3);
+    this.leftWing.root.rotation.y = Math.sin(t*0.6 + this.params.phaseOffset)*0.06 + asym;
+    this.leftWing.mid.rotation.x = THREE.MathUtils.lerp(this.leftWing.mid.rotation.x, ( - (strokeVal(leftPhase - midDelay) * 0.85) ) * 0.9, 0.25);
+    this.leftWing.tip.rotation.x = THREE.MathUtils.lerp(this.leftWing.tip.rotation.x, ( - (strokeVal(leftPhase - tipDelay) * 0.6) ) * 0.9, 0.22);
+    this.leftWing.tip.rotation.z = THREE.MathUtils.lerp(this.leftWing.tip.rotation.z || 0, -0.05 - (Math.max(0, lv) * 0.06), 0.15);
+
+    this.rightWing.root.rotation.x = THREE.MathUtils.lerp(this.rightWing.root.rotation.x, ( -rv * rootDownMul + 0.08 ) * 0.9, 0.3);
+    this.rightWing.root.rotation.y = Math.sin(t*0.6 + this.params.phaseOffset + 0.4)*0.06 - asym;
+    this.rightWing.mid.rotation.x = THREE.MathUtils.lerp(this.rightWing.mid.rotation.x, ( - (strokeVal(rightPhase - midDelay) * 0.85) ) * 0.9, 0.25);
+    this.rightWing.tip.rotation.x = THREE.MathUtils.lerp(this.rightWing.tip.rotation.x, ( - (strokeVal(rightPhase - tipDelay) * 0.6) ) * 0.9, 0.22);
+    this.rightWing.tip.rotation.z = THREE.MathUtils.lerp(this.rightWing.tip.rotation.z || 0, 0.05 + (Math.max(0, rv) * 0.06), 0.15);
+
+    const bodyUp = (Math.max(0, lv) + Math.max(0, rv)) * 0.07 * (this.inGlide ? 0.25 : 1.0);
+    this.body.position.y = THREE.MathUtils.lerp(this.body.position.y, bodyUp, 0.12);
+    this.rotation.z = THREE.MathUtils.lerp(this.rotation.z, asym*0.8, 0.06);
+
+    const head = this.body.getObjectByName('head');
+    if (head) head.rotation.x = THREE.MathUtils.lerp(head.rotation.x || 0, -0.06, 0.06);
+
+    const baseSpeed = 0.6 * settings.flightSpeed * this.localSpeedMul;
+    const time = t*0.4 + this.params.pathOffset;
+    const rx = Math.sin(time*0.9 + this.params.id) * settings.areaRadius * 0.7 + Math.sin(time*0.33 + this.params.id*2)*6;
+    const rz = Math.cos(time*0.7 + this.params.id*1.3) * settings.areaRadius * 0.5 + Math.cos(time*0.23 + this.params.id*0.9)*6;
+    const ry = Math.sin(time*0.5 + this.params.id*0.6)*3 + Math.sin(time*0.12 + this.params.id*0.7)*1.6 + 6;
+
+    const target = new THREE.Vector3(rx, ry, rz);
+    target.add(this.params.positionOffset.clone().multiplyScalar(0.25));
+
+    const pos = this.position;
+    const desired = target.clone().sub(pos).multiplyScalar(0.6 * dt * baseSpeed);
+    this.velocity.lerp(desired, 0.55);
+    pos.add(this.velocity);
+
+    const forward = this.velocity.clone();
+    forward.y *= 0.6;
+    if (forward.lengthSq() > 1e-6) {
+      const look = new THREE.Vector3().copy(forward).normalize();
+      const yaw = Math.atan2(look.x, look.z);
+      const pitch = -Math.asin(THREE.MathUtils.clamp(look.y, -0.9, 0.9)) * 0.6;
+      this.rotation.y = THREE.MathUtils.lerp(this.rotation.y, yaw, 0.08);
+      this.rotation.x = THREE.MathUtils.lerp(this.rotation.x, pitch, 0.06);
+    }
+
+    const tail = this.body.getObjectByName('tail');
+    if (tail) tail.rotation.z = THREE.MathUtils.lerp(tail.rotation.z || 0, -this.rotation.z*0.9, 0.08);
+
+    const microNoise = 0.008 * (this.inGlide ? 1.0 : 0.45);
+    this.leftWing.tip.rotation.x += Math.sin(t*8 + this.params.phaseOffset)*microNoise;
+    this.rightWing.tip.rotation.x += Math.sin(t*8 + this.params.phaseOffset+0.6)*microNoise;
   }
 }
 
 function randRange(a,b){ return a + Math.random()*(b-a); }
 
-// --------------------
-// spawn scheduling and offset generation with minimum separation
-// --------------------
+// create birds
 let birds = [];
-const minimumSeparation = 3.5;
-function scheduleSpawnTimes(count){
-  const times = [];
-  if (count <= 0) return times;
-  const first = randRange(0.2, 0.5); times.push(first);
-  // distribute remaining between 1.0 and 4.0 with small gaps 0.05..0.12
-  let t = 1.0;
-  for (let i=1;i<count;i++){
-    const gap = randRange(0.05, 0.12);
-    t += gap;
-    const spawn = Math.min(4.0, t + randRange(-0.02,0.02));
-    times.push(spawn);
-    if (t >= 4.0) t = 4.0;
-  }
-  return times;
-}
-
-function generateFlockOffsets(count){
-  const offsets = [];
-  const attemptsLimit = 30;
-  for (let i=0;i<count;i++){
-    let attempt = 0; let ok = false; let ox=0, oy=0, oz=0;
-    while(attempt < attemptsLimit && !ok){
-      // generate in fan/ellipse distribution
-      const theta = randRange(0, Math.PI*2);
-      const rX = randRange(12, 20); // radius multiplier along X
-      const rZ = randRange(12, 18);
-      // bias so more birds are forward than extreme back
-      const radiusX = randRange(8, rX);
-      const radiusZ = randRange(6, rZ);
-      ox = Math.cos(theta) * radiusX * randRange(0.6,1.0);
-      oz = Math.sin(theta) * radiusZ * randRange(0.6,1.0);
-      oy = randRange(-8, 12);
-      ok = true;
-      // check minimum separation in X/Y plane primarily
-      for (let j=0;j<offsets.length;j++){
-        const other = offsets[j];
-        const dx = ox - other.x; const dy = oy - other.y; const dist2 = dx*dx + dy*dy;
-        if (dist2 < minimumSeparation*minimumSeparation){ ok = false; break; }
-      }
-      attempt++;
-    }
-    if (!ok){ // accept last generated to avoid infinite loop
-      // if failed, jitter around a less crowded area
-      ox += randRange(-3,3); oy += randRange(-2,2); oz += randRange(-3,3);
-    }
-    offsets.push(new THREE.Vector3(ox, oy, oz));
-  }
-  return offsets;
-}
-
-function clearBirds(){ birds.forEach(b=>{ if(b.parent) b.parent.remove(b); if(b.sprite && b.sprite.material) b.sprite.material.dispose(); }); birds = []; }
-
 function createBirds(n){
-  clearBirds();
-  const finalN = Math.min(n, settings.maxBirds);
-  const spawnTimes = scheduleSpawnTimes(finalN);
-  const offsets = generateFlockOffsets(finalN);
-  for (let i=0;i<finalN;i++){
-    const b = new Bird({ size: settings.birdSize * randRange(0.9,1.15), flapSpeed: randRange(0.85,1.2), id:i });
-    b.params.spawnTime = spawnTimes[i] !== undefined ? spawnTimes[i] : randRange(1.0,4.0);
-    b._offset.copy(offsets[i]);
-    b.position.set(0,0,9999); b.visible=false; scene.add(b); birds.push(b);
+  birds.forEach(b => b.parent && b.parent.remove(b));
+  birds = [];
+  for (let i=0;i<n;i++){
+    const b = new Bird({ size: settings.birdSize * randRange(0.9,1.15), flapSpeed: randRange(0.85,1.2), flapAmount: randRange(0.85,1.15), id:i });
+    b.position.set(randRange(-6,6), randRange(2,7), randRange(-6,6));
+    scene.add(b);
+    birds.push(b);
   }
 }
+createBirds(settings.birdCount);
 
-// if images already ready
-if (birdImagesReady) createBirds(settings.birdCount);
+// UI bindings
+const countEl = document.getElementById('count');
+const flapSpeedEl = document.getElementById('flapSpeed');
+const flapAmountEl = document.getElementById('flapAmount');
+const flightSpeedEl = document.getElementById('flightSpeed');
 
-// --------------------
-// Camera start/stop (unchanged behavior)
-// --------------------
+if (countEl){
+  countEl.value = settings.birdCount;
+  countEl.oninput = (e)=> {
+    let val = Math.min(settings.maxBirds, parseInt(e.target.value));
+    settings.birdCount = val;
+    createBirds(val);
+  };
+}
+if (flapSpeedEl){
+  flapSpeedEl.value = settings.flapBaseSpeed;
+  flapSpeedEl.oninput = (e)=> settings.flapBaseSpeed = parseFloat(e.target.value);
+}
+if (flapAmountEl){
+  flapAmountEl.value = settings.flapBaseAmount;
+  flapAmountEl.oninput = (e)=> settings.flapBaseAmount = parseFloat(e.target.value);
+}
+if (flightSpeedEl){
+  flightSpeedEl.value = settings.flightSpeed;
+  flightSpeedEl.oninput = (e)=> settings.flightSpeed = parseFloat(e.target.value);
+}
+resetCamBtn.onclick = ()=>{ yaw = 0; pitch = -0.15; camera.position.set(0,8,settings.cameraDistance); };
+
+// Camera handling
 let stream = null;
 async function startCamera(){
-  try{ const constraints = { video: { facingMode: { ideal: 'environment' } }, audio:false }; stream = await navigator.mediaDevices.getUserMedia(constraints); video.srcObject = stream; await video.play(); startBtn.textContent = 'Stop Camera'; }catch(err){ console.error('Camera access error', err); alert('カメラへのアクセスが必要です。設定を確認してください。\n' + (err && err.message ? err.message : '')); } }
-function stopCamera(){ if(!stream) return; stream.getTracks().forEach(t=>t.stop()); stream=null; video.pause(); video.srcObject=null; startBtn.textContent='Start Camera'; }
-startBtn.addEventListener('click', async ()=>{ if (stream){ stopCamera(); return; } await startCamera(); });
-resetCamBtn.addEventListener('click', ()=>{ yaw=0; pitch=-0.15; camera.position.set(0,8,settings.cameraDistance); });
-
-// --------------------
-// main animation with phase-controlled flock
-// --------------------
-const clock = new THREE.Clock(); let elapsed = 0;
-
-function smoothstep(a,b,t){ const x = THREE.MathUtils.clamp((t-a)/(b-a),0,1); return x*x*(3-2*x); }
-
-function animate(){ requestAnimationFrame(animate); const dt = Math.min(0.06, clock.getDelta()); elapsed += dt; const phase = computePhase(elapsed);
-
-  // compute spreadFactor depending on phase and smooth interpolation
-  let spreadFactor = 1.0;
-  if (phase === PHASE.WAIT || phase === PHASE.APPROACH || phase === PHASE.GATHER) {
-    // small spread while gathering
-    const p = THREE.MathUtils.clamp((elapsed - phaseTimes.approachEnd)/(phaseTimes.gatherEnd - phaseTimes.approachEnd),0,1);
-    spreadFactor = THREE.MathUtils.lerp(0.35, 0.55, p); // tighter earlier
-  } else if (phase === PHASE.FORM){
-    spreadFactor = 0.6; // form end
-  } else if (phase === PHASE.CIRCLE){
-    // ramp from 0.6 at t=phaseTimes.formEnd to 1.0 at circle midpoint
-    const t0 = phaseTimes.formEnd; const t1 = (phaseTimes.formEnd + phaseTimes.circleEnd)/2; const t = THREE.MathUtils.clamp((elapsed - t0)/(t1 - t0),0,1);
-    spreadFactor = THREE.MathUtils.lerp(0.6, 1.0, smoothstep(0,1,t));
-  } else if (phase === PHASE.EXIT){
-    spreadFactor = 1.0;
+  try{
+    // Prefer environment (rear) camera on phones
+    const constraints = { video: { facingMode: { ideal: "environment" } }, audio: false };
+    stream = await navigator.mediaDevices.getUserMedia(constraints);
+    video.srcObject = stream;
+    await video.play();
+    if (captureBtn) captureBtn.disabled = false;
+    startBtn.textContent = 'Stop Camera';
+  }catch(err){
+    console.error('Camera access error', err);
+    alert('カメラへのアクセスが必要です。設定を確認してください。\n' + (err && err.message ? err.message : ''));
   }
-
-  // update flockCenter depending on phase
-  if (phase === PHASE.WAIT){ flockCenter.set(0,6,30); }
-  else if (phase === PHASE.APPROACH){ const p = THREE.MathUtils.clamp((elapsed - 0.2)/(1.2 - 0.2),0,1); flockCenter.lerpVectors(new THREE.Vector3(0,6,30), circleBase, p); }
-  else if (phase === PHASE.GATHER){ flockCenter.copy(circleBase); }
-  else if (phase === PHASE.FORM){ // small transition to starting circle
-    const p = THREE.MathUtils.clamp((elapsed - phaseTimes.gatherEnd)/(phaseTimes.formEnd - phaseTimes.gatherEnd),0,1); flockCenter.lerpVectors(circleBase, circleBase, p);
-  }
-  else if (phase === PHASE.CIRCLE){ const t = (elapsed - phaseTimes.formEnd)/(phaseTimes.circleEnd - phaseTimes.formEnd); const angle = -t * Math.PI * 2; flockCenter.x = circleRadiusX * Math.cos(angle); flockCenter.y = circleBase.y + Math.sin(angle * 0.6) * 3.0; flockCenter.z = circleBase.z + circleRadiusZ * Math.sin(angle); }
-  else if (phase === PHASE.EXIT){ const p = THREE.MathUtils.clamp((elapsed - phaseTimes.circleEnd)/(phaseTimes.exitEnd - phaseTimes.circleEnd),0,1); const exitTarget = new THREE.Vector3(40, 22, 120); flockCenter.lerpVectors(flockCenter, exitTarget, smoothstep(0,1,p)); }
-
-  // update birds
-  for (let i=0;i<birds.length;i++){ birds[i].update(dt, elapsed * settings.flightSpeed, elapsed, flockCenter, phase, spreadFactor); }
-
-  // camera orbit
-  const radius = settings.cameraDistance; const cx = Math.sin(yaw)*radius, cz = Math.cos(yaw)*radius; const cy = THREE.MathUtils.lerp(camera.position.y, 6 + pitch*6 + Math.sin(elapsed*0.2)*1.4, 0.08); camera.position.set(cx, cy, cz); camera.lookAt(0, 3, 0);
-
-  renderer.render(scene, camera);
+}
+function stopCamera(){
+  if (!stream) return;
+  stream.getTracks().forEach(track => track.stop());
+  stream = null;
+  video.pause();
+  video.srcObject = null;
+  if (captureBtn) captureBtn.disabled = true;
+  startBtn.textContent = 'Start Camera';
 }
 
+startBtn.addEventListener('click', async ()=>{
+  if (stream) { stopCamera(); return; }
+  await startCamera();
+});
+
+// Capture photo: composite video frame + WebGL canvas
+if (captureBtn){
+  captureBtn.addEventListener('click', ()=>{
+    try {
+      // use the renderer canvas resolution (device pixels)
+      const webglCanvas = renderer.domElement;
+      const w = webglCanvas.width;
+      const h = webglCanvas.height;
+
+      const out = document.createElement('canvas');
+      out.width = w;
+      out.height = h;
+      const ctx = out.getContext('2d');
+
+      // draw video to fill (stretched to canvas). This keeps it simple.
+      // Option: compute cropping to preserve aspect ratio. For now, stretch cover.
+      try {
+        ctx.drawImage(video, 0, 0, w, h);
+      } catch (e){
+        console.warn('Video draw warning', e);
+        // if video not ready, fill black
+        ctx.fillStyle = '#000';
+        ctx.fillRect(0,0,w,h);
+      }
+
+      // draw WebGL canvas on top
+      ctx.drawImage(webglCanvas, 0, 0, w, h);
+
+      // open data URL in new tab (or trigger download)
+      out.toBlob((blob) => {
+        if (!blob) {
+          alert('キャプチャに失敗しました');
+          return;
+        }
+        const url = URL.createObjectURL(blob);
+        // open in new tab for user to save/share
+        window.open(url, '_blank');
+        // optional: revoke after a while
+        setTimeout(()=>URL.revokeObjectURL(url), 60000);
+      }, 'image/jpeg', 0.92);
+    } catch(e){
+      console.error('Capture failed', e);
+      alert('キャプチャに失敗しました: ' + (e && e.message));
+    }
+  });
+}
+
+// main animation
+let clock = new THREE.Clock();
+let elapsed = 0;
+function animate(){
+  const dt = Math.min(0.06, clock.getDelta());
+  elapsed += dt;
+
+  for (let b of birds){
+    b.params.flapSpeed = 1.0;
+    b.params.flapAmount = 1.0;
+    b.update(dt, elapsed * settings.flightSpeed);
+  }
+
+  const radius = settings.cameraDistance;
+  const cx = Math.sin(yaw)*radius, cz = Math.cos(yaw)*radius;
+  const cy = THREE.MathUtils.lerp(camera.position.y, 6 + pitch*6 + Math.sin(elapsed*0.2)*1.4, 0.08);
+  camera.position.set(cx, cy, cz);
+  camera.lookAt(0, 3, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(animate);
+}
 animate();
 
 // responsive
-window.addEventListener('resize', ()=>{ const w = window.innerWidth, h = window.innerHeight; renderer.setSize(w,h); renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2)); camera.aspect = w/h; camera.updateProjectionMatrix(); });
+window.addEventListener('resize', ()=>{
+  const w = window.innerWidth, h = window.innerHeight;
+  renderer.setSize(w,h);
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  camera.aspect = w/h;
+  camera.updateProjectionMatrix();
+});
 
-// cleanup
-window.addEventListener('pagehide', ()=>{ if (stream) stopCamera(); });
+// cleanup on page unload
+window.addEventListener('pagehide', ()=> stopCamera());
